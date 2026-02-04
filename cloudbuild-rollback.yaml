@@ -1,0 +1,219 @@
+# =============================================================================
+# Cloud Build Configuration for Rollback
+# =============================================================================
+# This configuration:
+# 1. Lists available revisions
+# 2. Rolls back to the previous stable revision
+# 3. Validates the rollback
+# =============================================================================
+
+timeout: 600s # 10 minutes
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+  machineType: 'E2_MEDIUM'
+
+substitutions:
+  _PROJECT_ID: ''
+  _REGION: 'europe-west1'
+  _APP_NAME: 'what-time-is-it'
+  _CLOUD_RUN_REGIONS: 'europe-west1,europe-west4,us-central1'
+  _ENVIRONMENT: 'prod'
+  _TARGET_REVISION: ''  # Optional: specify a specific revision to rollback to
+
+steps:
+  # ==========================================================================
+  # Step 1: Get current and previous revisions
+  # ==========================================================================
+  - id: 'get-revisions'
+    name: 'gcr.io/cloud-builders/gcloud'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        echo "Fetching revision information..."
+        
+        IFS=',' read -ra REGIONS <<< "${_CLOUD_RUN_REGIONS}"
+        FIRST_REGION="${REGIONS[0]}"
+        SERVICE_NAME="${_APP_NAME}-${_ENVIRONMENT}-${FIRST_REGION}"
+        
+        echo "Service: ${SERVICE_NAME}"
+        echo "Region: ${FIRST_REGION}"
+        echo ""
+        
+        # Get list of revisions
+        echo "Available revisions (most recent first):"
+        gcloud run revisions list \
+          --service="${SERVICE_NAME}" \
+          --region="${FIRST_REGION}" \
+          --project="${_PROJECT_ID}" \
+          --format="table(REVISION,ACTIVE,LAST_DEPLOYED_AT)" \
+          --limit=10
+        
+        # Get the current active revision
+        CURRENT_REVISION=$(gcloud run services describe ${SERVICE_NAME} \
+          --region="${FIRST_REGION}" \
+          --project="${_PROJECT_ID}" \
+          --format="value(status.traffic[0].revisionName)")
+        
+        echo ""
+        echo "Current active revision: ${CURRENT_REVISION}"
+        
+        # Get the previous revision (second in the list)
+        PREVIOUS_REVISION=$(gcloud run revisions list \
+          --service="${SERVICE_NAME}" \
+          --region="${FIRST_REGION}" \
+          --project="${_PROJECT_ID}" \
+          --format="value(REVISION)" \
+          --limit=2 | tail -n 1)
+        
+        echo "Previous revision: ${PREVIOUS_REVISION}"
+        
+        # Store revisions for next steps
+        echo "${CURRENT_REVISION}" > /workspace/current_revision.txt
+        echo "${PREVIOUS_REVISION}" > /workspace/previous_revision.txt
+
+  # ==========================================================================
+  # Step 2: Rollback to previous revision across all regions
+  # ==========================================================================
+  - id: 'rollback-all-regions'
+    name: 'gcr.io/cloud-builders/gcloud'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        echo "Starting rollback..."
+        
+        IFS=',' read -ra REGIONS <<< "${_CLOUD_RUN_REGIONS}"
+        
+        for REGION in "${REGIONS[@]}"; do
+          SERVICE_NAME="${_APP_NAME}-${_ENVIRONMENT}-${REGION}"
+          
+          echo "Rolling back ${SERVICE_NAME} in ${REGION}..."
+          
+          # Determine target revision
+          if [ -n "${_TARGET_REVISION}" ]; then
+            TARGET_REVISION="${_TARGET_REVISION}"
+          else
+            # Get previous revision for this region
+            TARGET_REVISION=$(gcloud run revisions list \
+              --service="${SERVICE_NAME}" \
+              --region="${REGION}" \
+              --project="${_PROJECT_ID}" \
+              --format="value(REVISION)" \
+              --limit=2 | tail -n 1)
+          fi
+          
+          if [ -z "${TARGET_REVISION}" ]; then
+            echo "ERROR: Could not find a revision to rollback to for ${SERVICE_NAME}"
+            exit 1
+          fi
+          
+          echo "Rolling back to revision: ${TARGET_REVISION}"
+          
+          # Route 100% traffic to the previous revision
+          gcloud run services update-traffic ${SERVICE_NAME} \
+            --project="${_PROJECT_ID}" \
+            --region="${REGION}" \
+            --to-revisions="${TARGET_REVISION}=100" \
+            --quiet
+          
+          echo "Rollback complete for ${REGION}"
+        done
+        
+        echo "All regions rolled back successfully"
+    waitFor: ['get-revisions']
+
+  # ==========================================================================
+  # Step 3: Validate rollback
+  # ==========================================================================
+  - id: 'validate-rollback'
+    name: 'gcr.io/cloud-builders/gcloud'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        echo "Validating rollback across all regions..."
+        
+        IFS=',' read -ra REGIONS <<< "${_CLOUD_RUN_REGIONS}"
+        ALL_HEALTHY=true
+        
+        # Wait for traffic changes to propagate
+        sleep 10
+        
+        for REGION in "${REGIONS[@]}"; do
+          SERVICE_NAME="${_APP_NAME}-${_ENVIRONMENT}-${REGION}"
+          
+          SERVICE_URL=$(gcloud run services describe ${SERVICE_NAME} \
+            --project="${_PROJECT_ID}" \
+            --region="${REGION}" \
+            --format="value(status.url)")
+          
+          # Get current active revision
+          ACTIVE_REVISION=$(gcloud run services describe ${SERVICE_NAME} \
+            --region="${REGION}" \
+            --project="${_PROJECT_ID}" \
+            --format="value(status.traffic[0].revisionName)")
+          
+          echo "Region: ${REGION}"
+          echo "  Active revision: ${ACTIVE_REVISION}"
+          
+          # Health check
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "${SERVICE_URL}" \
+            -H "Host: ${SERVICE_URL#https://}" --max-time 10)
+          
+          if [ "$HTTP_CODE" -eq 200 ]; then
+            echo "  Status: ✓ Healthy (HTTP $HTTP_CODE)"
+          else
+            echo "  Status: ✗ Unhealthy (HTTP $HTTP_CODE)"
+            ALL_HEALTHY=false
+          fi
+        done
+        
+        echo ""
+        
+        if [ "$ALL_HEALTHY" = true ]; then
+          echo "=============================================="
+          echo "         Rollback Successful"
+          echo "=============================================="
+          echo "All regions are healthy after rollback."
+        else
+          echo "=============================================="
+          echo "         Rollback Completed with Warnings"
+          echo "=============================================="
+          echo "Some regions may have issues. Please check the logs."
+        fi
+    waitFor: ['rollback-all-regions']
+
+  # ==========================================================================
+  # Step 4: Generate rollback report
+  # ==========================================================================
+  - id: 'rollback-report'
+    name: 'gcr.io/cloud-builders/gcloud'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        CURRENT_REVISION=$(cat /workspace/current_revision.txt)
+        PREVIOUS_REVISION=$(cat /workspace/previous_revision.txt)
+        
+        echo "=============================================="
+        echo "         Rollback Report"
+        echo "=============================================="
+        echo ""
+        echo "Rolled back from: ${CURRENT_REVISION}"
+        echo "Rolled back to:   ${PREVIOUS_REVISION}"
+        echo ""
+        echo "Regions affected:"
+        IFS=',' read -ra REGIONS <<< "${_CLOUD_RUN_REGIONS}"
+        for REGION in "${REGIONS[@]}"; do
+          echo "  - ${REGION}"
+        done
+        echo ""
+        echo "To roll forward again, deploy a new version or run:"
+        echo "  gcloud run services update-traffic SERVICE_NAME \\"
+        echo "    --to-revisions=REVISION_NAME=100 \\"
+        echo "    --region=REGION"
+        echo ""
+        echo "=============================================="
+    waitFor: ['validate-rollback']
