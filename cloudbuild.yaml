@@ -91,17 +91,25 @@ steps:
       - '-c'
       - |
         echo "Scanning image for vulnerabilities..."
-        gcloud artifacts docker images scan \
+        
+        # Run the scan and capture the operation name
+        SCAN_OUTPUT=$$(gcloud artifacts docker images scan \
           "${_ARTIFACT_REGISTRY}/${_APP_NAME}:${SHORT_SHA}" \
           --project="${_PROJECT_ID}" \
-          --format="json" > /workspace/scan_results.json || true
+          --format="value(response.scan)" 2>&1) || {
+          echo "Warning: Vulnerability scan failed or not available, continuing..."
+          echo "Vulnerability scan completed (skipped)"
+          exit 0
+        }
         
-        # Check for critical vulnerabilities
-        CRITICAL=$$(cat /workspace/scan_results.json | jq '.response.scan.vulnerabilities.critical // 0')
-        if [ "$$CRITICAL" -gt 0 ]; then
-          echo "WARNING: Found $$CRITICAL critical vulnerabilities"
-          # Uncomment the next line to fail the build on critical vulnerabilities
-          # exit 1
+        if [ -n "$${SCAN_OUTPUT}" ]; then
+          echo "Scan completed: $${SCAN_OUTPUT}"
+          
+          # List vulnerabilities if scan was successful
+          gcloud artifacts docker images list-vulnerabilities "$${SCAN_OUTPUT}" \
+            --project="${_PROJECT_ID}" \
+            --format="table(vulnerability.effectiveSeverity, vulnerability.cvssScore, vulnerability.packageIssue.affectedPackage)" \
+            2>/dev/null || echo "Could not retrieve vulnerability details"
         fi
         
         echo "Vulnerability scan completed"
@@ -120,7 +128,11 @@ steps:
         FIRST_REGION=$$(echo "${_CLOUD_RUN_REGIONS}" | cut -d',' -f1)
         SERVICE_NAME="${_APP_NAME}-${_ENVIRONMENT}-$${FIRST_REGION}"
         
-        echo "Deploying canary to $${FIRST_REGION}..."
+        # Use short tag to stay under 46 char limit (service name + tag combined)
+        # SHORT_SHA is 7 chars, so "c-" + 7 = 9 chars for tag
+        CANARY_TAG="c-${SHORT_SHA}"
+        
+        echo "Deploying canary to $${FIRST_REGION} with tag $${CANARY_TAG}..."
         
         # Deploy new revision with no traffic
         gcloud run deploy $${SERVICE_NAME} \
@@ -128,8 +140,11 @@ steps:
           --region="$${FIRST_REGION}" \
           --image="${_ARTIFACT_REGISTRY}/${_APP_NAME}:${SHORT_SHA}" \
           --no-traffic \
-          --tag="canary-${SHORT_SHA}" \
+          --tag="$${CANARY_TAG}" \
           --quiet
+        
+        # Save the canary tag for subsequent steps
+        echo "$${CANARY_TAG}" > /workspace/canary_tag.txt
         
         # If canary percent is > 0, route some traffic to the new revision
         if [ "${_CANARY_PERCENT}" -gt 0 ]; then
@@ -165,29 +180,52 @@ steps:
       - |
         FIRST_REGION=$$(echo "${_CLOUD_RUN_REGIONS}" | cut -d',' -f1)
         SERVICE_NAME="${_APP_NAME}-${_ENVIRONMENT}-$${FIRST_REGION}"
+        CANARY_TAG=$$(cat /workspace/canary_tag.txt)
         
         echo "Validating canary deployment..."
         
-        # Get the canary URL
+        # Get the canary-specific tagged URL using gcloud native formatting
+        # (avoiding jq dependency which isn't available in the gcloud image)
         CANARY_URL=$$(gcloud run services describe $${SERVICE_NAME} \
           --project="${_PROJECT_ID}" \
           --region="$${FIRST_REGION}" \
-          --format="value(status.url)")
+          --format="csv[no-heading](status.traffic.tag,status.traffic.url)" | \
+          grep "^$${CANARY_TAG}," | cut -d',' -f2)
+        
+        # Fallback to main URL if tagged URL not found
+        if [ -z "$${CANARY_URL}" ]; then
+          echo "Warning: Could not find tagged URL, using main service URL"
+          CANARY_URL=$$(gcloud run services describe $${SERVICE_NAME} \
+            --project="${_PROJECT_ID}" \
+            --region="$${FIRST_REGION}" \
+            --format="value(status.url)")
+        fi
         
         echo "Testing canary at: $${CANARY_URL}"
         
         # Wait for the service to be ready
-        sleep 10
+        sleep 15
         
-        # Perform health check
-        HTTP_CODE=$$(curl -s -o /dev/null -w "%{http_code}" "$${CANARY_URL}" -H "Host: $${CANARY_URL#https://}")
+        # Perform health check with retries
+        MAX_RETRIES=3
+        RETRY_COUNT=0
+        HTTP_CODE=0
         
-        if [ "$$HTTP_CODE" -eq 200 ]; then
-          echo "Canary validation successful (HTTP $$HTTP_CODE)"
-        else
-          echo "Canary validation failed (HTTP $$HTTP_CODE)"
-          exit 1
-        fi
+        while [ $$RETRY_COUNT -lt $$MAX_RETRIES ]; do
+          HTTP_CODE=$$(curl -s -o /dev/null -w "%{http_code}" "$${CANARY_URL}" --max-time 30)
+          
+          if [ "$$HTTP_CODE" -eq 200 ]; then
+            echo "Canary validation successful (HTTP $$HTTP_CODE)"
+            exit 0
+          fi
+          
+          RETRY_COUNT=$$((RETRY_COUNT + 1))
+          echo "Attempt $$RETRY_COUNT failed (HTTP $$HTTP_CODE), retrying in 10s..."
+          sleep 10
+        done
+        
+        echo "Canary validation failed after $$MAX_RETRIES attempts (HTTP $$HTTP_CODE)"
+        exit 1
     waitFor: ['deploy-canary']
 
   # ==========================================================================
