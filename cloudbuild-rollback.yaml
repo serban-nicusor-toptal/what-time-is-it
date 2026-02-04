@@ -34,44 +34,44 @@ steps:
         echo "Fetching revision information..."
         
         IFS=',' read -ra REGIONS <<< "${_CLOUD_RUN_REGIONS}"
-        FIRST_REGION="${REGIONS[0]}"
-        SERVICE_NAME="${_APP_NAME}-${_ENVIRONMENT}-${FIRST_REGION}"
+        FIRST_REGION="$${REGIONS[0]}"
+        SERVICE_NAME="${_APP_NAME}-${_ENVIRONMENT}-$${FIRST_REGION}"
         
-        echo "Service: ${SERVICE_NAME}"
-        echo "Region: ${FIRST_REGION}"
+        echo "Service: $${SERVICE_NAME}"
+        echo "Region: $${FIRST_REGION}"
         echo ""
         
         # Get list of revisions
         echo "Available revisions (most recent first):"
         gcloud run revisions list \
-          --service="${SERVICE_NAME}" \
-          --region="${FIRST_REGION}" \
+          --service="$${SERVICE_NAME}" \
+          --region="$${FIRST_REGION}" \
           --project="${_PROJECT_ID}" \
           --format="table(REVISION,ACTIVE,LAST_DEPLOYED_AT)" \
           --limit=10
         
         # Get the current active revision
-        CURRENT_REVISION=$(gcloud run services describe ${SERVICE_NAME} \
-          --region="${FIRST_REGION}" \
+        CURRENT_REVISION=$$(gcloud run services describe $${SERVICE_NAME} \
+          --region="$${FIRST_REGION}" \
           --project="${_PROJECT_ID}" \
           --format="value(status.traffic[0].revisionName)")
         
         echo ""
-        echo "Current active revision: ${CURRENT_REVISION}"
+        echo "Current active revision: $${CURRENT_REVISION}"
         
         # Get the previous revision (second in the list)
-        PREVIOUS_REVISION=$(gcloud run revisions list \
-          --service="${SERVICE_NAME}" \
-          --region="${FIRST_REGION}" \
+        PREVIOUS_REVISION=$$(gcloud run revisions list \
+          --service="$${SERVICE_NAME}" \
+          --region="$${FIRST_REGION}" \
           --project="${_PROJECT_ID}" \
           --format="value(REVISION)" \
           --limit=2 | tail -n 1)
         
-        echo "Previous revision: ${PREVIOUS_REVISION}"
+        echo "Previous revision: $${PREVIOUS_REVISION}"
         
         # Store revisions for next steps
-        echo "${CURRENT_REVISION}" > /workspace/current_revision.txt
-        echo "${PREVIOUS_REVISION}" > /workspace/previous_revision.txt
+        echo "$${CURRENT_REVISION}" > /workspace/current_revision.txt
+        echo "$${PREVIOUS_REVISION}" > /workspace/previous_revision.txt
 
   # ==========================================================================
   # Step 2: Rollback to previous revision across all regions
@@ -86,39 +86,39 @@ steps:
         
         IFS=',' read -ra REGIONS <<< "${_CLOUD_RUN_REGIONS}"
         
-        for REGION in "${REGIONS[@]}"; do
-          SERVICE_NAME="${_APP_NAME}-${_ENVIRONMENT}-${REGION}"
+        for REGION in "$${REGIONS[@]}"; do
+          SERVICE_NAME="${_APP_NAME}-${_ENVIRONMENT}-$${REGION}"
           
-          echo "Rolling back ${SERVICE_NAME} in ${REGION}..."
+          echo "Rolling back $${SERVICE_NAME} in $${REGION}..."
           
           # Determine target revision
           if [ -n "${_TARGET_REVISION}" ]; then
             TARGET_REVISION="${_TARGET_REVISION}"
           else
             # Get previous revision for this region
-            TARGET_REVISION=$(gcloud run revisions list \
-              --service="${SERVICE_NAME}" \
-              --region="${REGION}" \
+            TARGET_REVISION=$$(gcloud run revisions list \
+              --service="$${SERVICE_NAME}" \
+              --region="$${REGION}" \
               --project="${_PROJECT_ID}" \
               --format="value(REVISION)" \
               --limit=2 | tail -n 1)
           fi
           
-          if [ -z "${TARGET_REVISION}" ]; then
-            echo "ERROR: Could not find a revision to rollback to for ${SERVICE_NAME}"
+          if [ -z "$${TARGET_REVISION}" ]; then
+            echo "ERROR: Could not find a revision to rollback to for $${SERVICE_NAME}"
             exit 1
           fi
           
-          echo "Rolling back to revision: ${TARGET_REVISION}"
+          echo "Rolling back to revision: $${TARGET_REVISION}"
           
           # Route 100% traffic to the previous revision
-          gcloud run services update-traffic ${SERVICE_NAME} \
+          gcloud run services update-traffic $${SERVICE_NAME} \
             --project="${_PROJECT_ID}" \
-            --region="${REGION}" \
-            --to-revisions="${TARGET_REVISION}=100" \
+            --region="$${REGION}" \
+            --to-revisions="$${TARGET_REVISION}=100" \
             --quiet
           
-          echo "Rollback complete for ${REGION}"
+          echo "Rollback complete for $${REGION}"
         done
         
         echo "All regions rolled back successfully"
@@ -141,38 +141,38 @@ steps:
         # Wait for traffic changes to propagate
         sleep 10
         
-        for REGION in "${REGIONS[@]}"; do
-          SERVICE_NAME="${_APP_NAME}-${_ENVIRONMENT}-${REGION}"
+        for REGION in "$${REGIONS[@]}"; do
+          SERVICE_NAME="${_APP_NAME}-${_ENVIRONMENT}-$${REGION}"
           
-          SERVICE_URL=$(gcloud run services describe ${SERVICE_NAME} \
+          SERVICE_URL=$$(gcloud run services describe $${SERVICE_NAME} \
             --project="${_PROJECT_ID}" \
-            --region="${REGION}" \
+            --region="$${REGION}" \
             --format="value(status.url)")
           
           # Get current active revision
-          ACTIVE_REVISION=$(gcloud run services describe ${SERVICE_NAME} \
-            --region="${REGION}" \
+          ACTIVE_REVISION=$$(gcloud run services describe $${SERVICE_NAME} \
+            --region="$${REGION}" \
             --project="${_PROJECT_ID}" \
             --format="value(status.traffic[0].revisionName)")
           
-          echo "Region: ${REGION}"
-          echo "  Active revision: ${ACTIVE_REVISION}"
+          echo "Region: $${REGION}"
+          echo "  Active revision: $${ACTIVE_REVISION}"
           
           # Health check
-          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "${SERVICE_URL}" \
-            -H "Host: ${SERVICE_URL#https://}" --max-time 10)
+          HTTP_CODE=$$(curl -s -o /dev/null -w "%{http_code}" "$${SERVICE_URL}" \
+            -H "Host: $${SERVICE_URL#https://}" --max-time 10)
           
-          if [ "$HTTP_CODE" -eq 200 ]; then
-            echo "  Status: ✓ Healthy (HTTP $HTTP_CODE)"
+          if [ "$$HTTP_CODE" -eq 200 ]; then
+            echo "  Status: ✓ Healthy (HTTP $$HTTP_CODE)"
           else
-            echo "  Status: ✗ Unhealthy (HTTP $HTTP_CODE)"
+            echo "  Status: ✗ Unhealthy (HTTP $$HTTP_CODE)"
             ALL_HEALTHY=false
           fi
         done
         
         echo ""
         
-        if [ "$ALL_HEALTHY" = true ]; then
+        if [ "$$ALL_HEALTHY" = true ]; then
           echo "=============================================="
           echo "         Rollback Successful"
           echo "=============================================="
@@ -194,20 +194,20 @@ steps:
     args:
       - '-c'
       - |
-        CURRENT_REVISION=$(cat /workspace/current_revision.txt)
-        PREVIOUS_REVISION=$(cat /workspace/previous_revision.txt)
+        CURRENT_REVISION=$$(cat /workspace/current_revision.txt)
+        PREVIOUS_REVISION=$$(cat /workspace/previous_revision.txt)
         
         echo "=============================================="
         echo "         Rollback Report"
         echo "=============================================="
         echo ""
-        echo "Rolled back from: ${CURRENT_REVISION}"
-        echo "Rolled back to:   ${PREVIOUS_REVISION}"
+        echo "Rolled back from: $${CURRENT_REVISION}"
+        echo "Rolled back to:   $${PREVIOUS_REVISION}"
         echo ""
         echo "Regions affected:"
         IFS=',' read -ra REGIONS <<< "${_CLOUD_RUN_REGIONS}"
-        for REGION in "${REGIONS[@]}"; do
-          echo "  - ${REGION}"
+        for REGION in "$${REGIONS[@]}"; do
+          echo "  - $${REGION}"
         done
         echo ""
         echo "To roll forward again, deploy a new version or run:"

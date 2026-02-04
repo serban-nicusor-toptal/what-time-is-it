@@ -74,9 +74,9 @@ steps:
           --format="json" > /workspace/scan_results.json || true
         
         # Check for critical vulnerabilities
-        CRITICAL=$(cat /workspace/scan_results.json | jq '.response.scan.vulnerabilities.critical // 0')
-        if [ "$CRITICAL" -gt 0 ]; then
-          echo "WARNING: Found $CRITICAL critical vulnerabilities"
+        CRITICAL=$$(cat /workspace/scan_results.json | jq '.response.scan.vulnerabilities.critical // 0')
+        if [ "$$CRITICAL" -gt 0 ]; then
+          echo "WARNING: Found $$CRITICAL critical vulnerabilities"
           # Uncomment the next line to fail the build on critical vulnerabilities
           # exit 1
         fi
@@ -94,15 +94,15 @@ steps:
       - '-c'
       - |
         # Get the first region for canary deployment
-        FIRST_REGION=$(echo "${_CLOUD_RUN_REGIONS}" | cut -d',' -f1)
-        SERVICE_NAME="${_APP_NAME}-${_ENVIRONMENT}-${FIRST_REGION}"
+        FIRST_REGION=$$(echo "${_CLOUD_RUN_REGIONS}" | cut -d',' -f1)
+        SERVICE_NAME="${_APP_NAME}-${_ENVIRONMENT}-$${FIRST_REGION}"
         
-        echo "Deploying canary to ${FIRST_REGION}..."
+        echo "Deploying canary to $${FIRST_REGION}..."
         
         # Deploy new revision with no traffic
-        gcloud run deploy ${SERVICE_NAME} \
+        gcloud run deploy $${SERVICE_NAME} \
           --project="${_PROJECT_ID}" \
-          --region="${FIRST_REGION}" \
+          --region="$${FIRST_REGION}" \
           --image="${_ARTIFACT_REGISTRY}/${_APP_NAME}:${SHORT_SHA}" \
           --no-traffic \
           --tag="canary-${SHORT_SHA}" \
@@ -113,22 +113,22 @@ steps:
           echo "Routing ${_CANARY_PERCENT}% traffic to canary..."
           
           # Get the new revision name
-          NEW_REVISION=$(gcloud run revisions list \
-            --service="${SERVICE_NAME}" \
-            --region="${FIRST_REGION}" \
+          NEW_REVISION=$$(gcloud run revisions list \
+            --service="$${SERVICE_NAME}" \
+            --region="$${FIRST_REGION}" \
             --project="${_PROJECT_ID}" \
             --format="value(REVISION)" \
             --limit=1)
           
           # Update traffic split
-          gcloud run services update-traffic ${SERVICE_NAME} \
+          gcloud run services update-traffic $${SERVICE_NAME} \
             --project="${_PROJECT_ID}" \
-            --region="${FIRST_REGION}" \
-            --to-revisions="${NEW_REVISION}=${_CANARY_PERCENT}" \
+            --region="$${FIRST_REGION}" \
+            --to-revisions="$${NEW_REVISION}=${_CANARY_PERCENT}" \
             --quiet
         fi
         
-        echo "Canary deployment complete for ${FIRST_REGION}"
+        echo "Canary deployment complete for $${FIRST_REGION}"
     waitFor: ['scan-image']
 
   # ==========================================================================
@@ -140,29 +140,29 @@ steps:
     args:
       - '-c'
       - |
-        FIRST_REGION=$(echo "${_CLOUD_RUN_REGIONS}" | cut -d',' -f1)
-        SERVICE_NAME="${_APP_NAME}-${_ENVIRONMENT}-${FIRST_REGION}"
+        FIRST_REGION=$$(echo "${_CLOUD_RUN_REGIONS}" | cut -d',' -f1)
+        SERVICE_NAME="${_APP_NAME}-${_ENVIRONMENT}-$${FIRST_REGION}"
         
         echo "Validating canary deployment..."
         
         # Get the canary URL
-        CANARY_URL=$(gcloud run services describe ${SERVICE_NAME} \
+        CANARY_URL=$$(gcloud run services describe $${SERVICE_NAME} \
           --project="${_PROJECT_ID}" \
-          --region="${FIRST_REGION}" \
+          --region="$${FIRST_REGION}" \
           --format="value(status.url)")
         
-        echo "Testing canary at: ${CANARY_URL}"
+        echo "Testing canary at: $${CANARY_URL}"
         
         # Wait for the service to be ready
         sleep 10
         
         # Perform health check
-        HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "${CANARY_URL}" -H "Host: ${CANARY_URL#https://}")
+        HTTP_CODE=$$(curl -s -o /dev/null -w "%{http_code}" "$${CANARY_URL}" -H "Host: $${CANARY_URL#https://}")
         
-        if [ "$HTTP_CODE" -eq 200 ]; then
-          echo "Canary validation successful (HTTP $HTTP_CODE)"
+        if [ "$$HTTP_CODE" -eq 200 ]; then
+          echo "Canary validation successful (HTTP $$HTTP_CODE)"
         else
-          echo "Canary validation failed (HTTP $HTTP_CODE)"
+          echo "Canary validation failed (HTTP $$HTTP_CODE)"
           exit 1
         fi
     waitFor: ['deploy-canary']
@@ -181,19 +181,19 @@ steps:
         # Convert comma-separated regions to array
         IFS=',' read -ra REGIONS <<< "${_CLOUD_RUN_REGIONS}"
         
-        for REGION in "${REGIONS[@]}"; do
-          SERVICE_NAME="${_APP_NAME}-${_ENVIRONMENT}-${REGION}"
+        for REGION in "$${REGIONS[@]}"; do
+          SERVICE_NAME="${_APP_NAME}-${_ENVIRONMENT}-$${REGION}"
           
-          echo "Deploying to ${REGION}..."
+          echo "Deploying to $${REGION}..."
           
           # Deploy with full traffic
-          gcloud run deploy ${SERVICE_NAME} \
+          gcloud run deploy $${SERVICE_NAME} \
             --project="${_PROJECT_ID}" \
-            --region="${REGION}" \
+            --region="$${REGION}" \
             --image="${_ARTIFACT_REGISTRY}/${_APP_NAME}:${SHORT_SHA}" \
             --quiet
           
-          echo "Deployment complete for ${REGION}"
+          echo "Deployment complete for $${REGION}"
         done
         
         echo "All regions deployed successfully"
@@ -213,25 +213,25 @@ steps:
         IFS=',' read -ra REGIONS <<< "${_CLOUD_RUN_REGIONS}"
         ALL_HEALTHY=true
         
-        for REGION in "${REGIONS[@]}"; do
-          SERVICE_NAME="${_APP_NAME}-${_ENVIRONMENT}-${REGION}"
+        for REGION in "$${REGIONS[@]}"; do
+          SERVICE_NAME="${_APP_NAME}-${_ENVIRONMENT}-$${REGION}"
           
-          SERVICE_URL=$(gcloud run services describe ${SERVICE_NAME} \
+          SERVICE_URL=$$(gcloud run services describe $${SERVICE_NAME} \
             --project="${_PROJECT_ID}" \
-            --region="${REGION}" \
+            --region="$${REGION}" \
             --format="value(status.url)")
           
-          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "${SERVICE_URL}" -H "Host: ${SERVICE_URL#https://}")
+          HTTP_CODE=$$(curl -s -o /dev/null -w "%{http_code}" "$${SERVICE_URL}" -H "Host: $${SERVICE_URL#https://}")
           
-          if [ "$HTTP_CODE" -eq 200 ]; then
-            echo "✓ ${REGION}: Healthy (HTTP $HTTP_CODE)"
+          if [ "$$HTTP_CODE" -eq 200 ]; then
+            echo "✓ $${REGION}: Healthy (HTTP $$HTTP_CODE)"
           else
-            echo "✗ ${REGION}: Unhealthy (HTTP $HTTP_CODE)"
+            echo "✗ $${REGION}: Unhealthy (HTTP $$HTTP_CODE)"
             ALL_HEALTHY=false
           fi
         done
         
-        if [ "$ALL_HEALTHY" = true ]; then
+        if [ "$$ALL_HEALTHY" = true ]; then
           echo "All regions validated successfully"
         else
           echo "Some regions failed validation"
@@ -249,13 +249,13 @@ steps:
       - '-c'
       - |
         # Tag the successful image with a timestamp
-        TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+        TIMESTAMP=$$(date +%Y%m%d-%H%M%S)
         docker pull "${_ARTIFACT_REGISTRY}/${_APP_NAME}:${SHORT_SHA}"
         docker tag "${_ARTIFACT_REGISTRY}/${_APP_NAME}:${SHORT_SHA}" \
-          "${_ARTIFACT_REGISTRY}/${_APP_NAME}:release-${TIMESTAMP}"
-        docker push "${_ARTIFACT_REGISTRY}/${_APP_NAME}:release-${TIMESTAMP}"
+          "${_ARTIFACT_REGISTRY}/${_APP_NAME}:release-$${TIMESTAMP}"
+        docker push "${_ARTIFACT_REGISTRY}/${_APP_NAME}:release-$${TIMESTAMP}"
         
-        echo "Tagged release as: release-${TIMESTAMP}"
+        echo "Tagged release as: release-$${TIMESTAMP}"
     waitFor: ['validate-all-regions']
 
 # =============================================================================

@@ -111,23 +111,23 @@ steps:
         
         # Parse results
         if [ -f /workspace/scan_results.json ]; then
-          CRITICAL=$(cat /workspace/scan_results.json | jq '.response.scan.vulnerabilities.critical // 0')
-          HIGH=$(cat /workspace/scan_results.json | jq '.response.scan.vulnerabilities.high // 0')
-          MEDIUM=$(cat /workspace/scan_results.json | jq '.response.scan.vulnerabilities.medium // 0')
-          LOW=$(cat /workspace/scan_results.json | jq '.response.scan.vulnerabilities.low // 0')
+          CRITICAL=$$(cat /workspace/scan_results.json | jq '.response.scan.vulnerabilities.critical // 0')
+          HIGH=$$(cat /workspace/scan_results.json | jq '.response.scan.vulnerabilities.high // 0')
+          MEDIUM=$$(cat /workspace/scan_results.json | jq '.response.scan.vulnerabilities.medium // 0')
+          LOW=$$(cat /workspace/scan_results.json | jq '.response.scan.vulnerabilities.low // 0')
           
           echo "Vulnerability Summary:"
-          echo "  Critical: $CRITICAL"
-          echo "  High: $HIGH"
-          echo "  Medium: $MEDIUM"
-          echo "  Low: $LOW"
+          echo "  Critical: $$CRITICAL"
+          echo "  High: $$HIGH"
+          echo "  Medium: $$MEDIUM"
+          echo "  Low: $$LOW"
           
-          if [ "$CRITICAL" -gt 0 ]; then
+          if [ "$$CRITICAL" -gt 0 ]; then
             echo "ERROR: Critical vulnerabilities found!"
             exit 1
           fi
           
-          if [ "$HIGH" -gt 5 ]; then
+          if [ "$$HIGH" -gt 5 ]; then
             echo "WARNING: High number of high-severity vulnerabilities"
           fi
         fi
