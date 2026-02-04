@@ -135,17 +135,30 @@ steps:
         
         echo "Deploying canary to $${FIRST_REGION} with tag $${CANARY_TAG}..."
         
-        # Deploy new revision with no traffic
+        # Deploy with --ingress=all temporarily to allow direct tagged URL testing
+        # This will be changed back to internal-load-balancer in the full deployment
         gcloud run deploy $${SERVICE_NAME} \
           --project="${_PROJECT_ID}" \
           --region="$${FIRST_REGION}" \
           --image="${_ARTIFACT_REGISTRY}/${_APP_NAME}:${SHORT_SHA}" \
           --no-traffic \
           --tag="$${CANARY_TAG}" \
+          --ingress=all \
           --quiet
         
-        # Save the canary tag for subsequent steps
+        # Save the canary tag and region for subsequent steps
         echo "$${CANARY_TAG}" > /workspace/canary_tag.txt
+        echo "$${FIRST_REGION}" > /workspace/canary_region.txt
+        echo "$${SERVICE_NAME}" > /workspace/canary_service.txt
+        
+        # Get and save the canary-specific tagged URL for validation
+        CANARY_URL=$$(gcloud run services describe $${SERVICE_NAME} \
+          --project="${_PROJECT_ID}" \
+          --region="$${FIRST_REGION}" \
+          --format="csv[no-heading](status.traffic.tag,status.traffic.url)" | \
+          grep "^$${CANARY_TAG}," | cut -d',' -f2)
+        echo "$${CANARY_URL}" > /workspace/canary_url.txt
+        echo "Canary URL: $${CANARY_URL}"
         
         # If canary percent is > 0, route some traffic to the new revision
         if [ "${_CANARY_PERCENT}" -gt 0 ]; then
@@ -181,19 +194,20 @@ steps:
       - |
         echo "Validating canary deployment..."
         
-        # Cloud Run has internal-only ingress, so we must validate via the load balancer
-        # The canary traffic percentage routes some requests to the new revision
-        HEALTH_URL="${_HEALTH_CHECK_URL}"
+        # Read the canary URL that was saved in deploy-canary step
+        # This is the tagged URL that directly routes to the new revision
+        CANARY_URL=$$(cat /workspace/canary_url.txt)
         
-        if [ -z "$${HEALTH_URL}" ]; then
-          echo "Warning: _HEALTH_CHECK_URL not set, skipping validation"
-          exit 0
+        if [ -z "$${CANARY_URL}" ]; then
+          echo "Error: Canary URL not found. Deploy step may have failed."
+          exit 1
         fi
         
-        echo "Testing via load balancer: $${HEALTH_URL}"
+        echo "Testing canary directly at: $${CANARY_URL}"
+        echo "(Using --ingress=all temporarily for direct canary testing)"
         
-        # Wait for the deployment to propagate
-        sleep 20
+        # Wait for the deployment to be ready
+        sleep 15
         
         # Perform health check with retries on valid endpoints
         # (root path returns 404, use /amsterdam or /london instead)
@@ -204,13 +218,14 @@ steps:
           RETRY_COUNT=0
           HTTP_CODE=0
           
-          echo "Testing endpoint: $${HEALTH_URL}$${ENDPOINT}"
+          echo "Testing canary endpoint: $${CANARY_URL}$${ENDPOINT}"
           
           while [ $$RETRY_COUNT -lt $$MAX_RETRIES ]; do
-            HTTP_CODE=$$(curl -s -o /dev/null -w "%{http_code}" "$${HEALTH_URL}$${ENDPOINT}" --max-time 30)
+            HTTP_CODE=$$(curl -s -o /dev/null -w "%{http_code}" "$${CANARY_URL}$${ENDPOINT}" --max-time 30)
             
             if [ "$$HTTP_CODE" -eq 200 ]; then
-              echo "Canary validation successful for $${ENDPOINT} (HTTP $$HTTP_CODE)"
+              echo "✓ Canary validation successful for $${ENDPOINT} (HTTP $$HTTP_CODE)"
+              echo "Canary is healthy - proceeding with full deployment"
               exit 0
             fi
             
@@ -220,7 +235,8 @@ steps:
           done
         done
         
-        echo "Canary validation failed for all endpoints after $$MAX_RETRIES attempts (HTTP $$HTTP_CODE)"
+        echo "✗ Canary validation failed for all endpoints after $$MAX_RETRIES attempts (HTTP $$HTTP_CODE)"
+        echo "Aborting deployment - canary is unhealthy"
         exit 1
     waitFor: ['deploy-canary']
 
@@ -243,11 +259,13 @@ steps:
           
           echo "Deploying to $${REGION}..."
           
-          # Deploy with full traffic
+          # Deploy with full traffic and restore internal-load-balancer ingress
+          # (canary was deployed with --ingress=all for testing)
           gcloud run deploy $${SERVICE_NAME} \
             --project="${_PROJECT_ID}" \
             --region="$${REGION}" \
             --image="${_ARTIFACT_REGISTRY}/${_APP_NAME}:${SHORT_SHA}" \
+            --ingress=internal-and-cloud-load-balancing \
             --quiet
           
           echo "Deployment complete for $${REGION}"
