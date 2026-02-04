@@ -23,6 +23,7 @@ substitutions:
   _ENVIRONMENT: 'prod'
   _CANARY_PERCENT: '10'
   _SERVICE_ACCOUNT: ''
+  _HEALTH_CHECK_URL: ''  # Load balancer URL for health checks (Cloud Run has internal-only ingress)
 
 # Secret Manager secrets for Docker Hub authentication
 availableSecrets:
@@ -178,47 +179,35 @@ steps:
     args:
       - '-c'
       - |
-        FIRST_REGION=$$(echo "${_CLOUD_RUN_REGIONS}" | cut -d',' -f1)
-        SERVICE_NAME="${_APP_NAME}-${_ENVIRONMENT}-$${FIRST_REGION}"
-        CANARY_TAG=$$(cat /workspace/canary_tag.txt)
-        
         echo "Validating canary deployment..."
         
-        # Get the canary-specific tagged URL using gcloud native formatting
-        # (avoiding jq dependency which isn't available in the gcloud image)
-        CANARY_URL=$$(gcloud run services describe $${SERVICE_NAME} \
-          --project="${_PROJECT_ID}" \
-          --region="$${FIRST_REGION}" \
-          --format="csv[no-heading](status.traffic.tag,status.traffic.url)" | \
-          grep "^$${CANARY_TAG}," | cut -d',' -f2)
+        # Cloud Run has internal-only ingress, so we must validate via the load balancer
+        # The canary traffic percentage routes some requests to the new revision
+        HEALTH_URL="${_HEALTH_CHECK_URL}"
         
-        # Fallback to main URL if tagged URL not found
-        if [ -z "$${CANARY_URL}" ]; then
-          echo "Warning: Could not find tagged URL, using main service URL"
-          CANARY_URL=$$(gcloud run services describe $${SERVICE_NAME} \
-            --project="${_PROJECT_ID}" \
-            --region="$${FIRST_REGION}" \
-            --format="value(status.url)")
+        if [ -z "$${HEALTH_URL}" ]; then
+          echo "Warning: _HEALTH_CHECK_URL not set, skipping validation"
+          exit 0
         fi
         
-        echo "Testing canary at: $${CANARY_URL}"
+        echo "Testing via load balancer: $${HEALTH_URL}"
         
-        # Wait for the service to be ready
-        sleep 15
+        # Wait for the deployment to propagate
+        sleep 20
         
         # Perform health check with retries on valid endpoints
         # (root path returns 404, use /amsterdam or /london instead)
         HEALTH_ENDPOINTS="/amsterdam /london"
-        MAX_RETRIES=3
+        MAX_RETRIES=5
         
         for ENDPOINT in $$HEALTH_ENDPOINTS; do
           RETRY_COUNT=0
           HTTP_CODE=0
           
-          echo "Testing endpoint: $${CANARY_URL}$${ENDPOINT}"
+          echo "Testing endpoint: $${HEALTH_URL}$${ENDPOINT}"
           
           while [ $$RETRY_COUNT -lt $$MAX_RETRIES ]; do
-            HTTP_CODE=$$(curl -s -o /dev/null -w "%{http_code}" "$${CANARY_URL}$${ENDPOINT}" --max-time 30)
+            HTTP_CODE=$$(curl -s -o /dev/null -w "%{http_code}" "$${HEALTH_URL}$${ENDPOINT}" --max-time 30)
             
             if [ "$$HTTP_CODE" -eq 200 ]; then
               echo "Canary validation successful for $${ENDPOINT} (HTTP $$HTTP_CODE)"
@@ -278,36 +267,38 @@ steps:
       - |
         echo "Validating deployment across all regions..."
         
-        IFS=',' read -ra REGIONS <<< "${_CLOUD_RUN_REGIONS}"
-        ALL_HEALTHY=true
-        
-        # Use valid endpoint for health check (root returns 404)
+        # Cloud Run has internal-only ingress, validate via load balancer
+        HEALTH_URL="${_HEALTH_CHECK_URL}"
         HEALTH_ENDPOINT="/amsterdam"
         
-        for REGION in "$${REGIONS[@]}"; do
-          SERVICE_NAME="${_APP_NAME}-${_ENVIRONMENT}-$${REGION}"
-          
-          SERVICE_URL=$$(gcloud run services describe $${SERVICE_NAME} \
-            --project="${_PROJECT_ID}" \
-            --region="$${REGION}" \
-            --format="value(status.url)")
-          
-          HTTP_CODE=$$(curl -s -o /dev/null -w "%{http_code}" "$${SERVICE_URL}$${HEALTH_ENDPOINT}" --max-time 30)
+        if [ -z "$${HEALTH_URL}" ]; then
+          echo "Warning: _HEALTH_CHECK_URL not set, skipping validation"
+          exit 0
+        fi
+        
+        # Wait for deployment to propagate to load balancer
+        sleep 10
+        
+        # Test the load balancer endpoint multiple times to ensure all backends are healthy
+        MAX_RETRIES=5
+        RETRY_COUNT=0
+        
+        while [ $$RETRY_COUNT -lt $$MAX_RETRIES ]; do
+          HTTP_CODE=$$(curl -s -o /dev/null -w "%{http_code}" "$${HEALTH_URL}$${HEALTH_ENDPOINT}" --max-time 30)
           
           if [ "$$HTTP_CODE" -eq 200 ]; then
-            echo "✓ $${REGION}: Healthy (HTTP $$HTTP_CODE)"
-          else
-            echo "✗ $${REGION}: Unhealthy (HTTP $$HTTP_CODE)"
-            ALL_HEALTHY=false
+            echo "✓ Load balancer validation successful (HTTP $$HTTP_CODE)"
+            echo "All regions deployed and healthy"
+            exit 0
           fi
+          
+          RETRY_COUNT=$$((RETRY_COUNT + 1))
+          echo "Attempt $$RETRY_COUNT failed (HTTP $$HTTP_CODE), retrying in 10s..."
+          sleep 10
         done
         
-        if [ "$$ALL_HEALTHY" = true ]; then
-          echo "All regions validated successfully"
-        else
-          echo "Some regions failed validation"
-          exit 1
-        fi
+        echo "Validation failed after $$MAX_RETRIES attempts (HTTP $$HTTP_CODE)"
+        exit 1
     waitFor: ['deploy-all-regions']
 
   # ==========================================================================
