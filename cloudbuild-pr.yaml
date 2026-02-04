@@ -21,7 +21,29 @@ substitutions:
   _APP_NAME: 'what-time-is-it'
   _IS_PR: 'true'
 
+# Secret Manager secrets for Docker Hub authentication
+availableSecrets:
+  secretManager:
+    - versionName: projects/${_PROJECT_ID}/secrets/dockerhub-username/versions/latest
+      env: 'DOCKERHUB_USERNAME'
+    - versionName: projects/${_PROJECT_ID}/secrets/dockerhub-token/versions/latest
+      env: 'DOCKERHUB_TOKEN'
+
 steps:
+  # ==========================================================================
+  # Step 0: Authenticate with Docker Hub
+  # ==========================================================================
+  - id: 'docker-login'
+    name: 'gcr.io/cloud-builders/docker'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        echo "$$DOCKERHUB_TOKEN" | docker login -u "$$DOCKERHUB_USERNAME" --password-stdin
+    secretEnv:
+      - 'DOCKERHUB_USERNAME'
+      - 'DOCKERHUB_TOKEN'
+
   # ==========================================================================
   # Step 1: Build the Docker image
   # ==========================================================================
@@ -39,6 +61,7 @@ steps:
           .
     env:
       - 'DOCKER_BUILDKIT=1'
+    waitFor: ['docker-login']
 
   # ==========================================================================
   # Step 2: Push PR image to registry (for testing)
