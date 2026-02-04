@@ -151,13 +151,21 @@ steps:
         echo "$${FIRST_REGION}" > /workspace/canary_region.txt
         echo "$${SERVICE_NAME}" > /workspace/canary_service.txt
         
-        # Get and save the canary-specific tagged URL for validation
-        CANARY_URL=$$(gcloud run services describe $${SERVICE_NAME} \
+        # Get the base service URL and construct the canary tagged URL
+        # Tagged URLs have format: https://<tag>---<service-host>
+        BASE_URL=$$(gcloud run services describe $${SERVICE_NAME} \
           --project="${_PROJECT_ID}" \
           --region="$${FIRST_REGION}" \
-          --format="csv[no-heading](status.traffic.tag,status.traffic.url)" | \
-          grep "^$${CANARY_TAG}," | cut -d',' -f2)
+          --format="value(status.url)")
+        
+        # Extract the host from the URL (remove https://)
+        BASE_HOST=$${BASE_URL#https://}
+        
+        # Construct the canary tagged URL
+        CANARY_URL="https://$${CANARY_TAG}---$${BASE_HOST}"
+        
         echo "$${CANARY_URL}" > /workspace/canary_url.txt
+        echo "Base URL: $${BASE_URL}"
         echo "Canary URL: $${CANARY_URL}"
         
         # If canary percent is > 0, route some traffic to the new revision
