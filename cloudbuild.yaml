@@ -206,25 +206,32 @@ steps:
         # Wait for the service to be ready
         sleep 15
         
-        # Perform health check with retries
+        # Perform health check with retries on valid endpoints
+        # (root path returns 404, use /amsterdam or /london instead)
+        HEALTH_ENDPOINTS="/amsterdam /london"
         MAX_RETRIES=3
-        RETRY_COUNT=0
-        HTTP_CODE=0
         
-        while [ $$RETRY_COUNT -lt $$MAX_RETRIES ]; do
-          HTTP_CODE=$$(curl -s -o /dev/null -w "%{http_code}" "$${CANARY_URL}" --max-time 30)
+        for ENDPOINT in $$HEALTH_ENDPOINTS; do
+          RETRY_COUNT=0
+          HTTP_CODE=0
           
-          if [ "$$HTTP_CODE" -eq 200 ]; then
-            echo "Canary validation successful (HTTP $$HTTP_CODE)"
-            exit 0
-          fi
+          echo "Testing endpoint: $${CANARY_URL}$${ENDPOINT}"
           
-          RETRY_COUNT=$$((RETRY_COUNT + 1))
-          echo "Attempt $$RETRY_COUNT failed (HTTP $$HTTP_CODE), retrying in 10s..."
-          sleep 10
+          while [ $$RETRY_COUNT -lt $$MAX_RETRIES ]; do
+            HTTP_CODE=$$(curl -s -o /dev/null -w "%{http_code}" "$${CANARY_URL}$${ENDPOINT}" --max-time 30)
+            
+            if [ "$$HTTP_CODE" -eq 200 ]; then
+              echo "Canary validation successful for $${ENDPOINT} (HTTP $$HTTP_CODE)"
+              exit 0
+            fi
+            
+            RETRY_COUNT=$$((RETRY_COUNT + 1))
+            echo "Attempt $$RETRY_COUNT for $${ENDPOINT} failed (HTTP $$HTTP_CODE), retrying in 10s..."
+            sleep 10
+          done
         done
         
-        echo "Canary validation failed after $$MAX_RETRIES attempts (HTTP $$HTTP_CODE)"
+        echo "Canary validation failed for all endpoints after $$MAX_RETRIES attempts (HTTP $$HTTP_CODE)"
         exit 1
     waitFor: ['deploy-canary']
 
@@ -274,6 +281,9 @@ steps:
         IFS=',' read -ra REGIONS <<< "${_CLOUD_RUN_REGIONS}"
         ALL_HEALTHY=true
         
+        # Use valid endpoint for health check (root returns 404)
+        HEALTH_ENDPOINT="/amsterdam"
+        
         for REGION in "$${REGIONS[@]}"; do
           SERVICE_NAME="${_APP_NAME}-${_ENVIRONMENT}-$${REGION}"
           
@@ -282,7 +292,7 @@ steps:
             --region="$${REGION}" \
             --format="value(status.url)")
           
-          HTTP_CODE=$$(curl -s -o /dev/null -w "%{http_code}" "$${SERVICE_URL}" -H "Host: $${SERVICE_URL#https://}")
+          HTTP_CODE=$$(curl -s -o /dev/null -w "%{http_code}" "$${SERVICE_URL}$${HEALTH_ENDPOINT}" --max-time 30)
           
           if [ "$$HTTP_CODE" -eq 200 ]; then
             echo "✓ $${REGION}: Healthy (HTTP $$HTTP_CODE)"
